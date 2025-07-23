@@ -1,3 +1,10 @@
+
+import pandas as pd
+import numpy as np
+from openpyxl import Workbook
+from openpyxl.styles import Font, Border, Side, Alignment, PatternFill
+from openpyxl.utils import get_column_letter
+
 def format_currency(value: float) -> str:
     """Форматирует число в валюту с рублями"""
     if pd.isna(value) or value == 0:
