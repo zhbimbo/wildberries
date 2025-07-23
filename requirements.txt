@@ -1,8 +1,11 @@
-setuptools>=65.0.0
-wheel>=0.38.0
-Flask==2.3.2
-pandas==1.5.3
-openpyxl==3.1.2
-numpy==1.24.3
-Werkzeug==2.3.7
-gunicorn==21.2.0
+# Сначала устанавливаем сборочные инструменты
+setuptools>=75.8.0
+wheel>=0.45.1
+# Затем основные зависимости
+# Используем версии, совместимые с Python 3.11/3.12 и имеющие wheels
+numpy==1.26.4
+pandas==2.2.3
+openpyxl==3.1.5
+Flask==3.1.0
+Werkzeug==3.1.3
+gunicorn==23.0.0
