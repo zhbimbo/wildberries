@@ -4,7 +4,15 @@ import uuid
 import logging
 from flask import Flask, request, jsonify, send_from_directory, abort
 from werkzeug.utils import secure_filename
-from processor import process_wb_report_file  # Импортируем вашу функцию
+from flask_cors import CORS  # Импортируем CORS
+
+# Импортируем вашу функцию обработки
+try:
+    from processor import process_wb_report_file
+    PROCESSOR_AVAILABLE = True
+except ImportError as e:
+    logging.error(f"Не удалось импортировать processor: {e}")
+    PROCESSOR_AVAILABLE = False
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -12,10 +20,16 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# --- Настройка CORS ---
+# Разрешаем запросы с любого origin (можно ограничить в production)
+CORS(app, origins=["https://zhbimbo.github.io"],  # Указываем ваш домен GitHub Pages
+     methods=["GET", "POST", "OPTIONS"], 
+     allow_headers=["Content-Type"])
+
 # --- Конфигурация ---
 # Используем переменные окружения от Render или значения по умолчанию
-UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', 'uploads')
-RESULT_FOLDER = os.environ.get('RESULT_FOLDER', 'results')
+UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', '/tmp/uploads')
+RESULT_FOLDER = os.environ.get('RESULT_FOLDER', '/tmp/results')
 MAX_CONTENT_LENGTH = int(os.environ.get('MAX_CONTENT_LENGTH', 10 * 1024 * 1024)) # 10MB по умолчанию
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -34,10 +48,20 @@ def allowed_file(filename):
 def home():
     return jsonify({"message": "API для обработки отчетов Wildberries запущен!"})
 
-@app.route('/api/upload', methods=['POST'])
+@app.route('/api/upload', methods=['POST', 'OPTIONS'])
 def upload_file():
+    # Обработка preflight OPTIONS запроса для CORS
+    if request.method == 'OPTIONS':
+        # Поскольку мы используем flask-cors, он должен автоматически обработать это
+        # Но явно вернем 200 OK для уверенности
+        return jsonify({"status": "OK"}), 200
+        
     logger.info("Получен запрос на загрузку файла")
     
+    if not PROCESSOR_AVAILABLE:
+        logger.error("Модуль processor недоступен")
+        return jsonify({'error': 'Сервис обработки временно недоступен'}), 500
+
     if 'file' not in request.files:
         logger.warning("Файл не найден в запросе")
         return jsonify({'error': 'Файл не найден в запросе'}), 400
@@ -68,8 +92,9 @@ def upload_file():
             logger.info(f"Файл обработан, результат: {result_path}")
 
             # Очистка временного загруженного файла
-            os.remove(file_path)
-            logger.info("Временный файл удален")
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                logger.info("Временный файл удален")
 
             return jsonify({
                 'message': 'Файл успешно обработан',
@@ -78,10 +103,14 @@ def upload_file():
             }), 200
 
         except Exception as e:
-            logger.error(f"Ошибка обработки файла: {e}")
+            logger.error(f"Ошибка обработки файла: {e}", exc_info=True)
             # Пытаемся удалить временные файлы в случае ошибки
             if 'file_path' in locals() and os.path.exists(file_path):
-                os.remove(file_path)
+                try:
+                    os.remove(file_path)
+                    logger.info("Временный файл удален после ошибки")
+                except Exception as remove_error:
+                    logger.error(f"Ошибка при удалении временного файла: {remove_error}")
             return jsonify({'error': f'Ошибка обработки файла: {str(e)}'}), 500
 
     else:
@@ -98,10 +127,10 @@ def download_file(filename):
             return send_from_directory(app.config['RESULT_FOLDER'], os.path.basename(filename), as_attachment=True)
         else:
             logger.warning(f"Файл не найден: {safe_path}")
-            abort(404)
+            return jsonify({'error': 'Файл не найден'}), 404
     except Exception as e:
-        logger.error(f"Ошибка скачивания файла: {e}")
-        abort(500)
+        logger.error(f"Ошибка скачивания файла: {e}", exc_info=True)
+        return jsonify({'error': 'Ошибка при скачивании файла'}), 500
 
 # Health check endpoint для Render
 @app.route('/healthz')
