@@ -21,17 +21,20 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # --- Настройка CORS ---
-# Разрешаем запросы с любого origin (можно ограничить в production)
-CORS(app, origins=["https://zhbimbo.github.io"],  # Указываем ваш домен GitHub Pages
+# Разрешаем запросы с вашего домена GitHub Pages
+# Можно указать список origins, если нужно
+CORS(app, origins=["https://zhbimbo.github.io", "http://localhost:5173"],  # Добавил localhost для локальной разработки
      methods=["GET", "POST", "OPTIONS"], 
      allow_headers=["Content-Type"])
 
 # --- Конфигурация ---
 # Используем переменные окружения от Render или значения по умолчанию
+# Для Render лучше использовать /tmp, так как это стандартная директория для временных файлов
 UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', '/tmp/uploads')
 RESULT_FOLDER = os.environ.get('RESULT_FOLDER', '/tmp/results')
-MAX_CONTENT_LENGTH = int(os.environ.get('MAX_CONTENT_LENGTH', 10 * 1024 * 1024)) # 10MB по умолчанию
+MAX_CONTENT_LENGTH = int(os.environ.get('MAX_CONTENT_LENGTH', 16 * 1024 * 1024)) # 16MB по умолчанию
 
+# Создаем директории, если они не существуют
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(RESULT_FOLDER, exist_ok=True)
 
@@ -42,18 +45,25 @@ app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
 ALLOWED_EXTENSIONS = {'xlsx', 'csv'}
 
 def allowed_file(filename):
+    """Проверяет, разрешено ли расширение файла."""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 @app.route('/', methods=['GET'])
 def home():
+    """Корневой эндпоинт для проверки работы API."""
     return jsonify({"message": "API для обработки отчетов Wildberries запущен!"})
+
+@app.route('/healthz', methods=['GET'])
+def health_check():
+    """Health check endpoint для Render."""
+    return jsonify({"status": "healthy"}), 200
 
 @app.route('/api/upload', methods=['POST', 'OPTIONS'])
 def upload_file():
+    """Эндпоинт для загрузки и обработки файла."""
     # Обработка preflight OPTIONS запроса для CORS
     if request.method == 'OPTIONS':
-        # Поскольку мы используем flask-cors, он должен автоматически обработать это
-        # Но явно вернем 200 OK для уверенности
+        # Flask-CORS должен обработать это автоматически, но явно вернем 200 OK
         return jsonify({"status": "OK"}), 200
         
     logger.info("Получен запрос на загрузку файла")
@@ -62,40 +72,48 @@ def upload_file():
         logger.error("Модуль processor недоступен")
         return jsonify({'error': 'Сервис обработки временно недоступен'}), 500
 
+    # Проверка наличия файла в запросе
     if 'file' not in request.files:
         logger.warning("Файл не найден в запросе")
         return jsonify({'error': 'Файл не найден в запросе'}), 400
 
     file = request.files['file']
 
+    # Проверка, был ли выбран файл
     if file.filename == '':
         logger.warning("Файл не выбран")
         return jsonify({'error': 'Файл не выбран'}), 400
 
+    # Проверка допустимого типа файла
     if file and allowed_file(file.filename):
         try:
-            original_filename = secure_filename(file.filename)
+            # Генерируем уникальное имя для временного файла
+            # Используем оригинальное расширение
+            original_extension = file.filename.rsplit('.', 1)[1].lower()
             unique_id = str(uuid.uuid4())
-            file_extension = original_filename.rsplit('.', 1)[1].lower()
-            unique_filename = f"{unique_id}.{file_extension}"
+            temp_filename = f"temp_{unique_id}.{original_extension}"
+            temp_file_path = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
             
-            file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
-            file.save(file_path)
-            logger.info(f"Файл сохранен: {file_path}")
+            # Сохраняем загруженный файл
+            file.save(temp_file_path)
+            logger.info(f"Файл сохранен как временный: {temp_file_path}")
 
-            # Обработка файла
+            # Определяем имя файла результата
             result_filename = f"результат_{unique_id}.xlsx"
-            result_path = os.path.join(app.config['RESULT_FOLDER'], result_filename)
+            result_file_path = os.path.join(app.config['RESULT_FOLDER'], result_filename)
             
             logger.info("Начало обработки файла...")
-            process_wb_report_file(file_path, result_path)  # Ваша функция
-            logger.info(f"Файл обработан, результат: {result_path}")
+            # Вызываем вашу функцию обработки
+            # Передаем путь к временному файлу и путь для сохранения результата
+            process_wb_report_file(temp_file_path, result_file_path)
+            logger.info(f"Файл обработан, результат сохранен: {result_file_path}")
 
             # Очистка временного загруженного файла
-            if os.path.exists(file_path):
-                os.remove(file_path)
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
                 logger.info("Временный файл удален")
 
+            # Возвращаем успех с информацией о результате
             return jsonify({
                 'message': 'Файл успешно обработан',
                 'result_filename': result_filename,
@@ -105,9 +123,9 @@ def upload_file():
         except Exception as e:
             logger.error(f"Ошибка обработки файла: {e}", exc_info=True)
             # Пытаемся удалить временные файлы в случае ошибки
-            if 'file_path' in locals() and os.path.exists(file_path):
+            if 'temp_file_path' in locals() and os.path.exists(temp_file_path):
                 try:
-                    os.remove(file_path)
+                    os.remove(temp_file_path)
                     logger.info("Временный файл удален после ошибки")
                 except Exception as remove_error:
                     logger.error(f"Ошибка при удалении временного файла: {remove_error}")
@@ -118,26 +136,48 @@ def upload_file():
 
 @app.route('/api/download/<filename>')
 def download_file(filename):
+    """Эндпоинт для скачивания результата обработки."""
     logger.info(f"Запрос на скачивание файла: {filename}")
     try:
-        # Защита от path traversal
-        safe_path = os.path.join(app.config['RESULT_FOLDER'], os.path.basename(filename))
-        if os.path.exists(safe_path) and os.path.isfile(safe_path):
-            logger.info(f"Файл найден, отправляем: {safe_path}")
-            return send_from_directory(app.config['RESULT_FOLDER'], os.path.basename(filename), as_attachment=True)
+        # Защита от path traversal - используем только базовое имя файла
+        safe_filename = os.path.basename(filename)
+        file_path = os.path.join(app.config['RESULT_FOLDER'], safe_filename)
+        
+        # Проверяем, существует ли файл и является ли он файлом (а не директорией)
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            logger.info(f"Файл найден, отправляем: {file_path}")
+            # Отправляем файл как вложение
+            return send_from_directory(app.config['RESULT_FOLDER'], safe_filename, as_attachment=True)
         else:
-            logger.warning(f"Файл не найден: {safe_path}")
+            logger.warning(f"Файл не найден или не является файлом: {file_path}")
             return jsonify({'error': 'Файл не найден'}), 404
     except Exception as e:
         logger.error(f"Ошибка скачивания файла: {e}", exc_info=True)
         return jsonify({'error': 'Ошибка при скачивании файла'}), 500
 
-# Health check endpoint для Render
-@app.route('/healthz')
-def health_check():
-    return jsonify({"status": "healthy"}), 200
+# --- Для разработки: раздача статики из React build ---
+# (Позже фронтенд будет на отдельном порту или сервере)
+# FRONTEND_BUILD_DIR = '../frontend/build' # Путь к сборке React
+# @app.route('/')
+# def index():
+#     """Обслуживает React-приложение."""
+#     try:
+#         return send_from_directory(FRONTEND_BUILD_DIR, 'index.html')
+#     except FileNotFoundError:
+#         return "Фронтенд не найден. Запустите 'npm run build' в папке frontend.", 404
+
+# @app.route('/<path:filename>')
+# def serve_static_files(filename):
+#     """Обслуживает статические файлы React."""
+#     try:
+#         return send_from_directory(FRONTEND_BUILD_DIR, filename)
+#     except FileNotFoundError:
+#         # Если файл не найден, возвращаем index.html для клиентского роутинга
+#         return send_from_directory(FRONTEND_BUILD_DIR, 'index.html')
 
 if __name__ == '__main__':
-    # Render автоматически устанавливает порт
+    # Render автоматически устанавливает порт через переменную окружения PORT
+    # По умолчанию используем 5000 для локальной разработки
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    # Важно: host='0.0.0.0' позволяет получить доступ к приложению снаружи контейнера
+    app.run(host='0.0.0.0', port=port, debug=False) # Установите debug=True для разработки, но False для продакшена
